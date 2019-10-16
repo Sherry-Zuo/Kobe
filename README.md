@@ -1,5 +1,6 @@
 ## Kobe
 How did Kobe Score?
+
 We are doing a Supervised Machine Learning for this project
 
 Our team is interested to analyze Kobe Bryant’s performance as he is one of the most valuable players in NBA. 
