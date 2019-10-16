@@ -1,0 +1,798 @@
+---
+title: "How Did Kobe Score?"
+subtitle: BA810 - Fall 2019 - Team Project
+author: "Shangkun Zuo"
+date: "10/17/2019"
+output: html_document
+---
+
+**Team 6 Members:** Alvaro Chinchayan, Leighton Li, Andrey Lifar, Yoki Liu, Yue Ping, Sherry Zuo  
+**Our Logo:** ![](kobe.jpeg){width=180px}  
+
+****
+>**Overview**
+
+Our team is interested to analyze Kobe Bryant's performance as he is one of the most valuable players in NBA. Specifically, we take a look at all his shots from 1996 to 2016. Our original dataset has 25 columns including information about shot types, ranges, game time and so on. After data cleaning, we run several models on 94 columns and caculate MSEs to determine the best fit.    
+We use Dataset [Kobe](https://www.kaggle.com/c/kobe-bryant-shot-selection/data)    
+
+***
+> **Table of Content** 
+
+1. Dataset Understanding   
+* Set Up    
+* Load the Koba Dataset    
+* Data Cleaning    
+* Preview of Data    
+  + Summary Stats    
+  + Describing the Data     
+2. Model Choosing     
+* Linear regression   
+  + Intercept  
+  + Full model  
+* Stepwise regression    
+  + Forward selection    
+  + Backward selection  
+* Penalized regression  
+  + Ridge    
+  + Lasso    
+* Trees     
+* Random Forest    
+* Boosting  
+3. Summary  
+
+***
+
+#### Dataset Understanding  
+##### Set Up  
+```{r message=FALSE}
+#loading libraries
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(ggplot2)
+library(ggthemes)
+library(glmnet)
+library(lubridate)
+library(fastDummies)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(gbm)
+theme_set(theme_bw())
+library(caret)
+library(leaps)
+library(ggvis)
+library(dvmisc)
+```
+
+##### Load the Kobe Dataset  
+```{r}
+kobe<-read_csv("data.csv")
+```
+```{r}
+dim(kobe)
+```
+
+##### Data Cleaning    
+```{r echo=T, results='hide'}
+any(is.na(kobe))
+complete.cases(kobe)
+Kobe<-na.omit(kobe)
+```
+
+```{r}
+## add new column time_remaining as seconds
+Kobe<-Kobe%>%mutate(time_remaining=minutes_remaining*60+seconds_remaining)
+## add new columns year, month, and day
+Kobe<-Kobe %>% mutate(year=year(game_date), month=month(game_date),
+                 day=day(game_date))
+## add new column home to see does Lakers is home or not
+Kobe<-Kobe %>% mutate(home = case_when( grepl("@", matchup) ~ 1, grepl("vs.", matchup) ~ 0))
+## add angle for the shot
+Kobe<-Kobe%>%mutate(angle=(atan(abs(loc_y/loc_x))*180/pi))
+## add angle range for the shot
+Kobe<-Kobe %>% 
+  mutate(angle_range = case_when(angle <= 30 ~ "0-30 degrees",
+                                 angle <= 60 ~ "30-60 degrees", 
+                                 angle <= 90 ~ "60-90 degrees",
+                                 is.na(angle)==TRUE ~ "basket"))
+Kobe$angle_range<-factor(Kobe$angle_range, levels=c("0-30 degrees", "30-60 degrees", "60-90 degrees", "basket"))
+## change the order of levels 
+Kobe$shot_zone_range<-factor(Kobe$shot_zone_range, levels=c("Less Than 8 ft.", "8-16 ft.", "16-24 ft.", "24+ ft.", "Back Court Shot"))
+```
+
+##### Preview of Data    
+**Summary Stats**    
+```{r}
+dim(Kobe)
+```
+Our dataset has 25697 rows, 32 columns.
+```{r}
+colnames(Kobe)
+```
+```{r}
+head(Kobe)
+```
+```{r}
+str(Kobe)
+```
+
+***
+  
+**Describing the Data**  
+```{r message=FALSE, warning=FALSE}
+Kobe %>% 
+  group_by(game_date)%>%
+  summarize(shots = sum(shot_made_flag))%>%
+  arrange(game_date)%>%
+  ggplot(aes(x=game_date, y=shots)) + 
+    geom_line(color="gold", alpha=0.7) + 
+    geom_smooth(se=FALSE, col="purple")+
+    labs(title="Kobe's scores Time Series Plot", x="Date",y="Shots Count")+
+    scale_x_date(date_labels = "%b-%Y")+
+    theme(panel.background = element_rect(fill="black"))
+```
+```{r message=FALSE, warning=FALSE}
+Kobe %>% 
+  group_by(year)%>%
+  summarize(shots_percentage = sum(shot_made_flag)/n())%>%
+  arrange(year)%>%
+  ggplot(aes(x=year, y=shots_percentage)) + 
+    geom_line(color="purple", alpha=0.7) + 
+    geom_smooth(se=FALSE, col="gold")+
+    labs(title="Kobe's scores percentage Time Series Plot", x="Year",y="Shots Percentage")+
+    theme(panel.background = element_rect(fill="black"))
+```
+
+Look through those categorical variables:  
+What's action_type?  
+```{r}
+Kobe%>%
+  group_by(action_type)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=factor(shot_made_flag)))+
+  geom_point(alpha=0.5)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+Kobe %>% 
+  group_by(shot_made_flag)%>%
+  summarise(success=n())%>%
+  ggplot(aes(x="", y=success, fill=factor(shot_made_flag)))+
+  geom_bar(width = 1, stat="identity", position="fill")+
+  coord_polar("y")+
+  scale_fill_manual(values = c("purple", "gold"))+
+  theme(panel.background = element_rect(fill="white"))+
+  labs(title = "Kobe Sucess or Fail",x='',y='')
+```
+What's combined_shot_type
+```{r}
+Kobe%>%
+  group_by(combined_shot_type)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=combined_shot_type))+
+  geom_point(alpha=0.3)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+ggplot(Kobe, aes(x=combined_shot_type, fill=factor(shot_made_flag)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values = c("purple", "gold"))
+```
+What's shot_type?
+```{r}
+Kobe%>%
+  group_by(shot_type)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=shot_type))+
+  geom_point(alpha=0.5)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+ggplot(Kobe, aes(x=shot_type, fill=factor(shot_made_flag)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values = c("purple", "gold"))
+```
+
+What's shot_zone_area?
+```{r}
+Kobe%>%
+  group_by(shot_zone_area)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=shot_zone_area))+
+  geom_point(alpha=0.5)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+ggplot(Kobe, aes(x=shot_zone_area, fill=factor(shot_made_flag)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values = c("purple", "gold"))
+```
+What's shot_zone_basic?
+```{r}
+Kobe%>%
+  group_by(shot_zone_basic)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=shot_zone_basic))+
+  geom_point(alpha=0.5)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+ggplot(Kobe, aes(x=shot_zone_basic, fill=factor(shot_made_flag)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values = c("purple", "gold"))+
+  theme(axis.text.x=element_text(angle=30))
+```
+What's shot_zong_range?
+```{r}
+Kobe%>%
+  group_by(shot_zone_range)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=shot_zone_range))+
+  geom_point(alpha=0.5)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+ggplot(Kobe, aes(x=shot_zone_range, fill=factor(shot_made_flag)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values = c("purple", "gold"))
+```
+What's angle_range?
+```{r}
+Kobe%>%
+  group_by(angle_range)%>%
+  summarize(shots=sum(shot_made_flag))%>%
+  arrange(desc(shots))
+```
+```{r}
+ggplot(Kobe, aes(loc_x, loc_y, color=angle_range))+
+  geom_point(alpha=0.5)+
+  theme(aspect.ratio = 1.9)
+```
+```{r}
+ggplot(Kobe, aes(x=angle_range, fill=factor(shot_made_flag)))+
+  geom_bar(position="fill")+
+  scale_fill_manual(values = c("purple", "gold"))
+```
+*Get working dataset*
+**dd**
+```{r}
+## add dummies by column combined_shot_type
+dd<-dummy_cols(Kobe, select_columns = c("action_type", "combined_shot_type","shot_type","shot_zone_area", "shot_zone_basic", "shot_zone_range", "angle_range"))
+dd <- dd[-c(1:5,8,9,12,13,16:25,27:29,31,32)]
+```
+```{r}
+head(dd)
+```
+```{r}
+dim(dd)
+```
+```{r}
+colnames(dd)
+```
+```{r}
+colnames(dd) <- gsub(' ', '_', colnames(dd))
+colnames(dd)
+```
+```{r echo=T, results='hide'}
+paste(colnames(dd), collapse = " + ")
+
+colnames(dd)[colnames(dd) == 'shot_zone_basic_Mid-Range'] <- 'shot_zone_basic_MidRange'
+
+colnames(dd)[colnames(dd) == 'shot_zone_basic_In_The_Paint_(Non-RA)'] <- 'shot_zone_basic_InThePaint(NonRA)'
+
+colnames(dd)[colnames(dd) == 'shot_zone_range_8-16_ft.'] <- 'shot_zone_range_8to16ft'
+
+colnames(dd)[colnames(dd) == 'shot_zone_range_16-24_ft.'] <- 
+'shot_zone_range_16to24ft'
+
+colnames(dd)[colnames(dd) == 'shot_zone_range_24+_ft.'] <- 'shot_zone_range_24plusft'
+
+colnames(dd)[colnames(dd) == 'angle_range_0-30_degrees'] <- 
+'angle_range_0to30_degrees'
+               
+colnames(dd)[colnames(dd) == 'angle_range_30-60_degrees'] <- 
+'angle_range30to60_degrees'
+
+colnames(dd)[colnames(dd) == 'angle_range_60-90_degrees'] <- 
+'angle_range_60to90_degrees'
+
+colnames(dd)[colnames(dd) == 'action_type_Running_Pull-Up_Jump_Shot'] <- 
+'action_type_Running_PullUp_Jump_Shot'
+
+colnames(dd)[colnames(dd) == 'shot_zone_area_Left_Side(L)'] <- 
+'shot_zone_area_Left_Side'
+             
+colnames(dd)[colnames(dd) == 'shot_zone_area_Left_Side_Center(LC)'] <- 
+'shot_zone_area_Left_Side_Center'
+             
+colnames(dd)[colnames(dd) == 'shot_zone_area_Right_Side_Center(RC)'] <- 
+'shot_zone_area_Right_Side_Center'
+             
+colnames(dd)[colnames(dd) == 'shot_zone_area_Center(C)'] <- 
+'shot_zone_area_Center'
+             
+colnames(dd)[colnames(dd) == 'shot_zone_area_Right_Side(R)'] <- 
+'shot_zone_area_Right_Side'
+             
+colnames(dd)[colnames(dd) == 'shot_zone_area_Back_Court(BC)'] <- 
+'shot_zone_area_Back_Court'
+
+colnames(dd)[colnames(dd) == 'shot_zone_basic_InThePaint(NonRA)'] <- 
+'shot_zone_basic_InThePaint'
+```
+```{r echo=T, results='hide'}
+paste(colnames(dd), collapse = " + ")   
+```
+```{r}
+colnames(dd)
+```
+**dd2**
+```{r}
+dd2<-Kobe[-c(1,3:5,8,9,12,13,20:25,27:29,31)]
+colnames(dd2)
+```
+```{r}
+dd2$combined_shot_type<-as.factor(dd2$combined_shot_type)
+dd2$shot_type<-as.factor(dd2$shot_type)
+dd2$shot_zone_area<-as.factor(dd2$shot_zone_area)
+dd2$shot_zone_basic<-as.factor(dd2$shot_zone_basic) 
+```
+
+```{r}
+str(dd2)
+```
+```{r}
+dim(dd2)
+```
+
+***
+
+#### Model Choosing    
+##### Split Dataset    
+```{r}
+set.seed(666)
+test_index <- sample(nrow(dd), 5140) # assign 5140 random rows to the test set(around 20% of our dataset)
+# now split
+dd.test <- dd[test_index,]
+dd.train <- dd[-test_index,]
+```
+
+##### Linear Regression 
+**Preparation**
+```{r}
+# Intercept
+intercept <- lm(shot_made_flag ~ 1, data=dd.train)
+summary(intercept)
+```
+```{r}
+get_mse(intercept, var.estimate = FALSE)
+```
+```{r}
+intercept.test <- lm(shot_made_flag ~1, data = dd.test)
+```
+```{r}
+get_mse(intercept.test, var.estimate = FALSE)
+```
+```{r echo=T, results='hide'}
+# Fit the full model 
+full.model <- lm(shot_made_flag ~., data = dd.train)
+summary(full.model)
+```
+```{r}
+get_mse(full.model, var.estimate = FALSE)
+```
+```{r}
+full.model.test <- lm(shot_made_flag ~., data = dd.test)
+```
+```{r}
+get_mse(full.model.test, var.estimate = FALSE)
+```
+
+***
+ 
+##### Stepwise Regression
+**Forward Selection** 
+```{r echo=T, results='hide'}
+set.seed(666)
+forward.model <- stepAIC(intercept, direction = "forward", scope=list(upper=full.model, lower=intercept))
+```
+```{r}
+forward.model$anova
+```
+```{r}
+get_mse(forward.model)
+```
+```{r}
+AIC <- as.data.frame(forward.model$anova$AIC)
+names(AIC) <- "AIC"
+AIC %>% 
+    ggvis(x=~ c(1:41), y=~AIC) %>%
+    layer_points(fill = ~ AIC) %>%
+    add_axis("y", title = "AIC") %>% 
+    add_axis("x", title = "Number of variables")
+```
+```{r}
+yhat_test_forward <- predict(forward.model,dd.test)
+```
+```{r}
+mse_test_forward <- mean((dd.test$shot_made_flag-yhat_test_forward)^2)
+mse_test_forward
+```
+
+**Backward Selection**
+```{r echo=T, results='hide'}
+set.seed(666)
+backward.model <- stepAIC(full.model, direction = "backward")
+```
+```{r}
+backward.model$anova
+```
+```{r}
+get_mse(backward.model)
+```
+```{r}
+AIC2 <- as.data.frame(backward.model$anova$AIC)
+names(AIC2) <- "AIC2"
+AIC2 %>% 
+    ggvis(x=~ c(1:46), y=~AIC2 ) %>%
+    layer_points(fill = ~ desc(AIC2)) %>%
+    add_axis("y", title = "AIC") %>% 
+    add_axis("x", title = "Number of variables eliminated")
+```
+```{r}
+yhat_test_backward <- predict(backward.model,dd.test)
+```
+```{r}
+mse_test_backward <- mean((dd.test$shot_made_flag-yhat_test_backward)^2)
+mse_test_backward
+```
+
+***
+
+##### Penalized regression
+```{r}
+x_data <- model.matrix( ~ -1 + . -shot_made_flag, dd)
+x_train <- x_data[-test_index, ]
+y_train <- dd$shot_made_flag[-test_index]
+x_test <- x_data[test_index, ]
+y_test <- dd$shot_made_flag[test_index]
+```
+**Ridge regression**    
+```{r}
+fit_ridge <- cv.glmnet(x_train, y_train, alpha = 0, nfolds = 10)
+```
+```{r}
+yhat_train_ridge <- predict(fit_ridge, x_train, s = fit_ridge$lambda.min) 
+mse_train_ridge <- mean((y_train - yhat_train_ridge)^2)
+mse_train_ridge
+```
+```{r}
+yhat_test_ridge <- predict(fit_ridge, x_test, s = fit_ridge$lambda.min) 
+mse_test_ridge <- mean((y_test - yhat_test_ridge)^2)
+mse_test_ridge
+```
+```{r}
+# Plot cross-validation results
+plot(fit_ridge)
+```
+```{r}
+fit_ridge2 <- glmnet(x_train, y_train, alpha = 0)
+plot(fit_ridge2, xvar = "lambda")
+```
+
+**Lasso regression**  
+```{r}
+fit_lasso <- cv.glmnet(x_train, y_train, alpha = 1, nfolds = 10)
+```
+```{r}
+yhat_train_lasso <- predict(fit_lasso, x_train, s = fit_lasso$lambda.min) 
+mse_train_lasso <- mean((y_train - yhat_train_lasso)^2)
+mse_train_lasso
+```
+
+```{r}
+yhat_test_lasso <- predict(fit_lasso, x_test, s = fit_lasso$lambda.min) 
+mse_test_lasso <- mean((y_test - yhat_test_lasso)^2)
+mse_test_lasso
+```
+```{r}
+# Plot cross-validation results
+plot(fit_lasso)
+```
+```{r message=FALSE, warning=FALSE}
+fit_lasso2 <- glmnet(x_train, y_train, alpha = 1)
+plot(fit_lasso2, xvar = "lambda")
+```
+
+Notice: Lasso has a better mse than Ridge in our dataset.
+```{r}
+##
+x_data_1 <- model.matrix( ~ -1 + loc_x + loc_y + playoffs + period + shot_distance + time_remaining + home +  action_type_Jump_Shot + action_type_Layup_Shot + combined_shot_type_Dunk, dd)
+x_train_1 <- x_data_1[-test_index, ]
+y_train_1 <- dd$shot_made_flag[-test_index]
+x_test_1 <- x_data_1[test_index, ]
+y_test_1 <- dd$shot_made_flag[test_index]
+```
+```{r}
+fit_ridge_1 <- cv.glmnet(x_train_1, y_train_1, alpha = 0, nfolds = 10)
+```
+```{r}
+yhat_train_ridge_1 <- predict(fit_ridge_1, x_train_1, s = fit_ridge_1$lambda.min) 
+mse_train_ridge_1 <- mean((y_train_1 - yhat_train_ridge_1)^2)
+mse_train_ridge_1
+```
+```{r}
+yhat_test_ridge_1 <- predict(fit_ridge_1, x_test_1, s = fit_ridge_1$lambda.min) 
+mse_test_ridge_1 <- mean((y_test_1 - yhat_test_ridge_1)^2)
+mse_test_ridge_1
+```
+```{r}
+plot(fit_ridge_1)
+```
+```{r}
+fit_ridge3 <- glmnet(x_train_1, y_train_1, alpha = 0)
+plot(fit_ridge3, xvar = "lambda")
+```
+
+```{r}
+fit_lasso_1 <- cv.glmnet(x_train_1, y_train_1, alpha = 1, nfolds = 10)
+```
+```{r}
+yhat_train_lasso_1 <- predict(fit_lasso_1, x_train_1, s = fit_lasso_1$lambda.min) 
+mse_train_lasso_1 <- mean((y_train_1 - yhat_train_lasso_1)^2)
+mse_train_lasso_1
+```
+Notice: Lasso has a better mse than Ridge in our dataset.
+```{r}
+yhat_test_lasso_1 <- predict(fit_lasso_1, x_test_1, s = fit_lasso_1$lambda.min) 
+mse_test_lasso_1 <- mean((y_test_1 - yhat_test_lasso_1)^2)
+mse_test_lasso_1
+```
+```{r}
+plot(fit_lasso_1)
+```
+```{r}
+fit_lasso3 <- glmnet(x_train_1, y_train_1, alpha = 1)
+plot(fit_lasso3, xvar = "lambda")
+```
+
+***  
+
+##### Trees
+```{r}
+set.seed(666)
+test_index2 <- sample(nrow(dd2), 5140) # assign 5140 random rows to the test set(around 20% of our dataset)
+# now split
+dd.test2 <- dd2[test_index2,]
+dd.train2 <- dd2[-test_index2,]
+```
+
+```{r}
+dd_test <- dd.test2 %>% filter(sample(c(0,1),nrow(dd.test2),replace=TRUE,prob=c(0.95,0.05))==1)
+dd_train <- dd.train2 %>% filter(sample(c(0,1),nrow(dd.train2),replace=TRUE,prob=c(0.95,0.05))==1)
+```
+
+```{r}
+y_train2 <- dd2$shot_made_flag[-test_index2]
+y_test2 <- dd2$shot_made_flag[test_index2]
+```
+
+```{r}
+f1 <- as.formula(shot_made_flag ~ shot_distance+time_remaining+period+shot_type)
+```
+
+```{r}
+fit.tree <- rpart(f1, dd_train,
+control = rpart.control(cp = 0.006))
+```
+```{r}
+par(xpd = TRUE) 
+plot(fit.tree, compress=TRUE) 
+text(fit.tree, use.n=TRUE)
+```
+```{r}
+rpart.plot(fit.tree)
+```
+```{r}
+rpart.plot(fit.tree, type = 1)
+```
+```{r}
+yhat.train.tree <- predict(fit.tree, dd_train)
+mse.train.tree <- mean((dd_train$shot_made_flag - yhat.train.tree)^2) 
+mse.train.tree
+```
+```{r}
+yhat.test.tree <- predict(fit.tree, dd_test)
+mse.test.tree <- mean((dd_test$shot_made_flag - yhat.test.tree)^2) 
+mse.test.tree
+```
+
+```{r}
+##bias-variance tradeoff using trees
+f2 <- as.formula(shot_made_flag ~ .)
+```
+```{r}
+set.seed(666)
+x0 <- dd_train[1,]
+dd_train_1 <- dd_train[-1,]
+yhat_small_tree <- c()
+for (i in seq(100)) { 
+  fit_tree <- rpart(f2,
+    dd_train_1 %>% sample_frac(size = .1),
+    control = rpart.control(cp = 0.001))
+  yhat <- predict(fit_tree, x0) 
+  yhat_small_tree <- c(yhat_small_tree, yhat)
+}
+# this is vector of predictions for the big trees
+yhat_big_tree <- c()
+#fit small trees with cp = 0.0001
+for (i in seq(100)) { 
+  fit_tree <- rpart(f2,
+    dd_train_1 %>% sample_frac(size = .1),
+    control = rpart.control(cp = 0.0001)) 
+  yhat <- predict(fit_tree, x0)
+  yhat_big_tree <- c(yhat_big_tree, yhat)
+}
+# make a data frame with the errors from our two trials
+errors <- data.frame(
+  "error"= (x0$shot_made_flag - c(yhat_small_tree, yhat_big_tree)),
+  "flexibility"= c(rep("small", length(yhat_small_tree)), rep("big",length(yhat_big_tree))))
+
+# in each plot notice the bias and variance
+ggplot(errors,aes(error)) +geom_density()+facet_grid(flexibility~.)
+```
+```{r}
+fit.tree_2 <- rpart(f2, dd_train,
+control = rpart.control(cp = 0.006))
+```
+```{r}
+par(xpd = TRUE) 
+plot(fit.tree_2, compress=TRUE) 
+text(fit.tree_2, use.n=TRUE)
+```
+```{r}
+rpart.plot(fit.tree_2)
+```
+```{r}
+rpart.plot(fit.tree_2, type = 1)
+```
+```{r}
+yhat.train.tree_2 <- predict(fit.tree_2, dd_train)
+mse.train.tree_2 <- mean((dd_train$shot_made_flag - yhat.train.tree_2)^2) 
+mse.train.tree_2
+```
+```{r}
+yhat.test.tree_2 <- predict(fit.tree_2, dd_test)
+mse.test.tree_2 <- mean((dd_test$shot_made_flag - yhat.test.tree_2)^2) 
+mse.test.tree_2
+```
+
+***  
+
+##### Random Forests  
+```{r}
+y_train2 <- dd2$shot_made_flag[-test_index2]
+y_test2 <- dd2$shot_made_flag[test_index2]
+```
+```{r}
+# the [, -1] means take all columns of the matrix except the first column, # which is an intercept added by default
+x1_train <- model.matrix(f1, dd.train2)[, -1]
+x1_test <- model.matrix(f1, dd.test2)[, -1]
+```
+
+```{r}
+fit_rf <- randomForest(f1, dd.train2,
+                  ntree=100,
+                  do.trace=F)
+```
+```{r}
+## Variable Importance Plot
+varImpPlot(fit_rf)
+```
+```{r}
+yhat_rf <- predict(fit_rf, dd.train2) 
+mse_rf_small <- mean((yhat_rf - y_train2) ^ 2) 
+print(mse_rf_small)
+```
+```{r}
+yhat_rf_test <- predict(fit_rf, dd.test2) 
+mse_rf_small_test <- mean((yhat_rf_test - y_test2) ^ 2) 
+print(mse_rf_small_test)
+```
+
+```{r}
+fit_rf2 <- randomForest(f2, dd.train2,
+                  ntree=100,
+                  do.trace=F)
+```
+```{r}
+varImpPlot(fit_rf2)
+```
+```{r}
+yhat_rf2 <- predict(fit_rf2, dd.train2) 
+mse_rf_big <- mean((yhat_rf2 - y_train2) ^ 2) 
+print(mse_rf_big)
+```
+```{r}
+yhat_rf2_test <- predict(fit_rf2, dd.test2) 
+mse_rf_big_test <- mean((yhat_rf2_test - y_test2) ^ 2) 
+print(mse_rf_big_test)
+```
+Notice: We want to get a large tree size in Random Forest 
+
+***
+
+##### Boosted trees  
+```{r}
+fit_btree_small <- gbm(f1, data = dd.train2,
+      distribution = "gaussian",
+      n.trees = 100,
+      interaction.depth = 2,
+      shrinkage = 0.001)
+```
+```{r}
+relative.influence(fit_btree_small)
+```
+
+```{r}
+yhat_btree_small <- predict(fit_btree_small, dd.train2, n.trees = 100) 
+mse_btree_small <- mean((yhat_btree_small - y_train2) ^ 2) 
+print(mse_btree_small)
+```
+```{r}
+yhat_btree_small_test <- predict(fit_btree_small, dd.test2, n.trees = 100) 
+mse_btree_small_test <- mean((yhat_btree_small_test - y_test2) ^ 2) 
+print(mse_btree_small_test)
+```
+
+
+```{r}
+fit_btree_big <- gbm(f2, data = dd.train2,
+      distribution = "gaussian",
+      n.trees = 100,
+      interaction.depth = 2,
+      shrinkage = 0.001)
+```
+```{r}
+relative.influence(fit_btree_big)
+```
+
+
+```{r}
+yhat_btree_big <- predict(fit_btree_big, dd.train2, n.trees = 100) 
+mse_btree_big <- mean((yhat_btree_big - y_train2) ^ 2) 
+print(mse_btree_big)
+```
+```{r}
+yhat_btree_big_test <- predict(fit_btree_big, dd.test2, n.trees = 100) 
+mse_btree_big_test <- mean((yhat_btree_big_test - y_test2) ^ 2) 
+print(mse_btree_big_test)
+```
+
+Notice: We want to get a small tree size in Boosting
+
+***
+
+#### Summary  
+After comparing all models of our dataset, we find out the best model is Lasso since it has the lowest MSE and did not overfitting. 
